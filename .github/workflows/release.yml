@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -40,3 +40,4 @@ jobs:
         with:
           files: dist/DeepSeek-Harness-Setup-*.exe
           fail_on_unmatched_files: true
+
