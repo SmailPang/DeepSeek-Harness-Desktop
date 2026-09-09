@@ -1,5 +1,7 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } = require('electron');
 const { spawn, execFile } = require('node:child_process');
+const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -13,9 +15,31 @@ let tray = null;
 let isQuiting = false;
 let dshProc = null;
 let dshUrl = null;
+let fixedPort = 0;
 let bootTimer = null;
 let stopped = false;
+let restarting = false;
 let trayHintShown = false;
+
+const RESTART_FETCH_PATCH = `(() => {
+  if (window.__dshFetchPatched) return;
+  window.__dshFetchPatched = true;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    try {
+      const target = typeof input === 'string' ? input : (input && input.url) || '';
+      const method = (init && init.method) || (input && input.method) || 'GET';
+      if (target.includes('/dsh-market/restart') && method.toUpperCase() === 'POST') {
+        if (window.__dshShell && window.__dshShell.requestRestart) window.__dshShell.requestRestart();
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, boot: 'shell', pid: 0, helperPid: 0 }), {
+          status: 202,
+          headers: { 'content-type': 'application/json' }
+        }));
+      }
+    } catch (_) {}
+    return originalFetch(input, init);
+  };
+})();`;
 
 function buildEnv() {
   const env = { ...process.env };
@@ -27,8 +51,22 @@ function buildEnv() {
   return env;
 }
 
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
 function killDshTree() {
-  if (!dshProc || dshProc.killed) return;
+  if (!dshProc || dshProc.killed) {
+    dshProc = null;
+    return;
+  }
   const pid = dshProc.pid;
   try {
     execFile('taskkill', ['/pid', String(pid), '/T', '/F'], () => {});
@@ -45,10 +83,7 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip(APP_TITLE);
   tray.setContextMenu(Menu.buildFromTemplate([
-    {
-      label: '显示主窗口',
-      click: showWindow
-    },
+    { label: '显示主窗口', click: showWindow },
     { type: 'separator' },
     {
       label: '退出',
@@ -81,6 +116,7 @@ function createWindow() {
     backgroundColor: '#f4f7fc',
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -107,6 +143,11 @@ function createWindow() {
   win.on('page-title-updated', (event) => {
     event.preventDefault();
     win.setTitle(APP_TITLE);
+  });
+
+  win.webContents.on('dom-ready', () => {
+    if (!dshUrl) return;
+    win.webContents.executeJavaScript(RESTART_FETCH_PATCH, true).catch(() => {});
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -156,13 +197,39 @@ function failBoot(title, detail) {
   app.exit(1);
 }
 
+const WEB_ALL_BUNDLE = '@linxin666/dsh-web-all';
+const WEB_ALL_EMBEDDED_BUNDLES = new Set([
+  'dsh-better-sidebar',
+  '@linxin666/dsh-remote-web-ui'
+]);
+
+function sanitizeProfileBundles() {
+  try {
+    const manifestPath = path.join(os.homedir(), '.dsh', 'profiles', 'web', 'package.json');
+    if (!fs.existsSync(manifestPath)) return;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const bundles = manifest?.dsh?.profile?.bundles;
+    if (!Array.isArray(bundles) || !bundles.includes(WEB_ALL_BUNDLE)) return;
+
+    const deduped = bundles.filter((name) => !WEB_ALL_EMBEDDED_BUNDLES.has(name));
+    if (deduped.length === bundles.length) return;
+
+    manifest.dsh.profile.bundles = deduped;
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  } catch {
+    // A broken/locked profile manifest must not prevent the normal dsh error path.
+  }
+}
+
 function startDsh() {
+  sanitizeProfileBundles();
   const env = buildEnv();
-  const args = ['/c', 'dsh', 'web', '--no-open', '--port', '0'];
-  dshProc = spawn(process.env.ComSpec || 'cmd.exe', args, {
+  const args = ['/c', 'dsh', 'web', '--no-open', '--port', String(fixedPort || 0)];
+  const proc = spawn(process.env.ComSpec || 'cmd.exe', args, {
     windowsHide: true,
     env
   });
+  dshProc = proc;
 
   let output = '';
   const capture = (chunk) => {
@@ -172,6 +239,9 @@ function startDsh() {
       const match = text.match(/https?:\/\/[^\s"'<>]+/);
       if (match) {
         dshUrl = match[0].trim();
+        if (!fixedPort) {
+          try { fixedPort = Number(new URL(dshUrl).port) || 0; } catch {}
+        }
         clearBootTimer();
         waitForServer(dshUrl, () => {
           if (!win || win.isDestroyed()) return;
@@ -181,18 +251,25 @@ function startDsh() {
       }
     }
   };
-  dshProc.stdout.on('data', capture);
-  dshProc.stderr.on('data', capture);
+  proc.stdout.on('data', capture);
+  proc.stderr.on('data', capture);
 
-  dshProc.on('error', (err) => {
+  proc.on('error', (err) => {
+    if (restarting) return;
     failBoot(
       '无法启动 dsh',
       `请确认已正确安装 dsh（npm install -g @deepseek-ai/dsh），且 dsh 命令在 PATH 中可用。\n\n错误信息：${err.message}`
     );
   });
 
-  dshProc.on('exit', (code) => {
-    if (stopped) return;
+  proc.on('exit', (code) => {
+    if (proc !== dshProc) return;
+    if (stopped || isQuiting) return;
+
+    if (restarting) {
+      return;
+    }
+
     stopped = true;
     isQuiting = true;
     clearBootTimer();
@@ -215,6 +292,31 @@ function startDsh() {
   }, BOOT_TIMEOUT_MS);
 }
 
+async function restartDsh() {
+  if (restarting || stopped) return;
+  restarting = true;
+  clearBootTimer();
+  dshUrl = null;
+
+  if (win && !win.isDestroyed()) {
+    win.setTitle(APP_TITLE);
+    win.loadFile(path.join(__dirname, 'loading.html'), { query: { reason: 'restart' } }).catch(() => {});
+    if (!win.isVisible()) win.show();
+  }
+
+  killDshTree();
+
+  if (!fixedPort) {
+    try { fixedPort = await findFreePort(); } catch { fixedPort = 0; }
+  }
+
+  setTimeout(() => {
+    if (!restarting || stopped) return;
+    restarting = false;
+    startDsh();
+  }, 800);
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -225,10 +327,16 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     createTray();
     createWindow();
+    try { fixedPort = await findFreePort(); } catch { fixedPort = 0; }
     startDsh();
+
+    ipcMain.on('dsh:request-restart', () => {
+      restartDsh().catch(() => {});
+    });
+
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -250,6 +358,7 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault();
   });
 }
+
 
 
 

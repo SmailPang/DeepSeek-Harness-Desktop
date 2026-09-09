@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
   <title>DeepSeek Harness</title>
   <style>
     html, body {
@@ -26,6 +26,7 @@
       border: 1px solid rgba(99, 116, 150, 0.14);
       border-radius: 22px;
       box-shadow: 0 18px 48px rgba(70, 95, 140, 0.14);
+      animation: rise 0.28s ease both;
     }
     .logo {
       width: 84px;
@@ -47,13 +48,27 @@
       color: #5b6678;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
   </style>
 </head>
 <body>
   <div class="card">
     <img class="logo" src="assets/icon.png" alt="DeepSeek Harness" />
     <div class="spinner"></div>
-    <div class="text">正在启动 DeepSeek Harness…</div>
+    <div class="text" id="status">正在启动 DeepSeek Harness…</div>
   </div>
+  <script>
+    (function () {
+      var reason = new URLSearchParams(window.location.search).get("reason");
+      if (reason === "restart") {
+        document.getElementById("status").textContent = "正在重启 DeepSeek Harness…";
+      }
+    })();
+  </script>
 </body>
 </html>
+
+

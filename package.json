@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "One-click desktop wrapper that launches dsh web and shows DeepSeek Harness Web UI as a desktop app.",
   "main": "main.js",
   "author": "",
@@ -19,6 +19,7 @@
     "productName": "DeepSeek Harness",
     "files": [
       "main.js",
+      "preload.js",
       "loading.html",
       "assets/**/*"
     ],
@@ -58,6 +59,7 @@
     }
   }
 }
+
 
 
 
