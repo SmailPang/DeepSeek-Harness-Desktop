@@ -8,7 +8,7 @@
   "scripts": {
     "postinstall": "node installer/patch-electron-builder.js",
     "start": "electron .",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder --win nsis --publish never"
   },
   "devDependencies": {
     "electron": "^37.0.0",
@@ -58,6 +58,7 @@
     }
   }
 }
+
 
 
 
