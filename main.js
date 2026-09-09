@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog } = require('electron');
 const { spawn, execFile } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -9,10 +9,13 @@ const BOOT_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 500;
 
 let win = null;
+let tray = null;
+let isQuiting = false;
 let dshProc = null;
 let dshUrl = null;
 let bootTimer = null;
 let stopped = false;
+let trayHintShown = false;
 
 function buildEnv() {
   const env = { ...process.env };
@@ -35,6 +38,37 @@ function killDshTree() {
   dshProc = null;
 }
 
+function createTray() {
+  if (tray) return;
+  const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.ico'));
+  if (icon.isEmpty()) return;
+  tray = new Tray(icon);
+  tray.setToolTip(APP_TITLE);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: '显示主窗口',
+      click: showWindow
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        isQuiting = true;
+        app.quit();
+      }
+    }
+  ]));
+  tray.on('double-click', showWindow);
+  tray.on('click', showWindow);
+}
+
+function showWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280,
@@ -55,6 +89,21 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, 'loading.html'));
   win.once('ready-to-show', () => win.show());
+
+  win.on('close', (event) => {
+    if (isQuiting || stopped) return;
+    event.preventDefault();
+    win.hide();
+    if (!trayHintShown) {
+      trayHintShown = true;
+      if (tray) tray.displayBalloon({
+        iconType: 'info',
+        title: APP_TITLE,
+        content: '应用仍在后台运行，点击托盘图标可重新打开窗口。'
+      });
+    }
+  });
+
   win.on('page-title-updated', (event) => {
     event.preventDefault();
     win.setTitle(APP_TITLE);
@@ -145,6 +194,7 @@ function startDsh() {
   dshProc.on('exit', (code) => {
     if (stopped) return;
     stopped = true;
+    isQuiting = true;
     clearBootTimer();
     if (!dshUrl) {
       dialog.showErrorBox(
@@ -176,6 +226,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    createTray();
     createWindow();
     startDsh();
 
@@ -185,13 +236,20 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    isQuiting = true;
     stopped = true;
     clearBootTimer();
     killDshTree();
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
   });
 
-  app.on('window-all-closed', () => {
-    app.quit();
+  app.on('window-all-closed', (event) => {
+    event.preventDefault();
   });
 }
+
+
 

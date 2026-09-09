@@ -6,6 +6,7 @@
 
 - **一键启动**：后台以隐藏窗口方式运行 `dsh web`（无命令行黑框），自动解析带鉴权 token 的本地地址（随机端口，避免冲突）并在桌面窗口中加载。
 - **同生共死**：dsh 进程退出时桌面窗口自动关闭；退出应用时通过 `taskkill /T /F` 清理整个子进程树，不留后台残留。
+- **最小化到托盘**：点击窗口关闭按钮不会退出，而是隐藏到系统托盘并在后台保持 dsh 运行（首次隐藏时气泡提示）；单击或双击托盘图标恢复窗口，托盘菜单可“显示主窗口”或“退出”。只有从托盘菜单选择退出才会结束应用并清理 dsh 子进程。
 - **图形化安装向导**：可自定义安装路径，自动创建桌面与开始菜单快捷方式。
 - **可选一键装环境**：安装程序可自动通过 npm 全局安装 dsh，并可选安装插件商店 [dshmarket](https://www.npmjs.com/package/dshmarket) 与 [DeepSeek Balance Whale Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)；默认走国内镜像，GitHub 资源自动镜像回退。
 - **卸载可选联动**：卸载时可选择是否一并移除全局安装的 dsh（默认只移除外壳，保护共享环境）。
@@ -104,3 +105,4 @@ installer/
 ## License
 
 [MIT](LICENSE)
+
