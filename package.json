@@ -1,0 +1,65 @@
+{
+  "name": "dsh-desktop",
+  "version": "1.2.2",
+  "description": "One-click desktop wrapper that launches dsh web and shows DeepSeek Harness Web UI as a desktop app.",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "node installer/patch-electron-builder.js",
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.dsh.desktop",
+    "productName": "DeepSeek Harness",
+    "files": [
+      "main.js",
+      "loading.html",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "installer",
+        "to": "setup",
+        "filter": [
+          "postinstall.ps1",
+          "uninstall-dsh.ps1"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "artifactName": "DeepSeek-Harness-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "menuCategory": false,
+      "shortcutName": "DeepSeek Harness",
+      "uninstallDisplayName": "DeepSeek Harness",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "installerSidebar": "assets/installer-sidebar.bmp",
+      "uninstallerSidebar": "assets/installer-sidebar.bmp",
+      "include": "installer/setup.nsh"
+    }
+  }
+}
+
+
+
+
+
