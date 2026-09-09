@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
+const { consumeLines, findLocalUrl, isSameOrigin, parseHttpUrl } = require('./lib/runtime-utils');
 
 const APP_TITLE = 'DeepSeek Harness';
 const BOOT_TIMEOUT_MS = 60_000;
@@ -17,6 +18,7 @@ let dshProc = null;
 let dshUrl = null;
 let fixedPort = 0;
 let bootTimer = null;
+let bootAttempt = 0;
 let stopped = false;
 let restarting = false;
 let trayHintShown = false;
@@ -65,15 +67,36 @@ function findFreePort() {
 function killDshTree() {
   if (!dshProc || dshProc.killed) {
     dshProc = null;
-    return;
+    return Promise.resolve();
   }
+  const proc = dshProc;
   const pid = dshProc.pid;
-  try {
-    execFile('taskkill', ['/pid', String(pid), '/T', '/F'], () => {});
-  } catch {
-    try { dshProc.kill(); } catch {}
-  }
   dshProc = null;
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      resolve();
+    }, 5000);
+    try {
+      execFile('taskkill', ['/pid', String(pid), '/T', '/F'], () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    } catch {
+      clearTimeout(timeout);
+      try { proc.kill(); } catch {}
+      resolve();
+    }
+  });
+}
+
+function isSameDshOrigin(value) {
+  return Boolean(dshUrl && isSameOrigin(value, dshUrl));
+}
+
+function openExternalUrl(value) {
+  const parsed = parseHttpUrl(value);
+  if (parsed) shell.openExternal(parsed.href).catch(() => {});
 }
 
 function createTray() {
@@ -151,15 +174,15 @@ function createWindow() {
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (dshUrl && url.startsWith(new URL(dshUrl).origin)) return { action: 'allow' };
-    shell.openExternal(url);
+    if (isSameDshOrigin(url)) return { action: 'allow' };
+    openExternalUrl(url);
     return { action: 'deny' };
   });
 
   win.webContents.on('will-navigate', (event, url) => {
-    if (dshUrl && url.startsWith(new URL(dshUrl).origin)) return;
+    if (isSameDshOrigin(url)) return;
     event.preventDefault();
-    shell.openExternal(url);
+    openExternalUrl(url);
   });
 
   win.on('closed', () => {
@@ -167,13 +190,16 @@ function createWindow() {
   });
 }
 
-function waitForServer(url, onReady) {
+function waitForServer(url, attempt, onReady) {
   const retry = () => {
-    if (stopped) return;
+    if (stopped || attempt !== bootAttempt) return;
     const req = http.get(url, (res) => {
       res.resume();
-      res.destroy();
-      onReady();
+      if (res.statusCode >= 200 && res.statusCode < 500) {
+        onReady();
+      } else {
+        setTimeout(retry, POLL_INTERVAL_MS);
+      }
     });
     req.setTimeout(2000, () => req.destroy());
     req.on('error', () => setTimeout(retry, POLL_INTERVAL_MS));
@@ -215,13 +241,19 @@ function sanitizeProfileBundles() {
     if (deduped.length === bundles.length) return;
 
     manifest.dsh.profile.bundles = deduped;
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    const backupPath = `${manifestPath}.dsh-desktop-backup`;
+    const tempPath = `${manifestPath}.${process.pid}.tmp`;
+    if (!fs.existsSync(backupPath)) fs.copyFileSync(manifestPath, backupPath);
+    fs.writeFileSync(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    fs.renameSync(tempPath, manifestPath);
+    console.log(`[dsh-desktop] Removed duplicate web bundles; backup: ${backupPath}`);
   } catch {
     // A broken/locked profile manifest must not prevent the normal dsh error path.
   }
 }
 
 function startDsh() {
+  const attempt = ++bootAttempt;
   sanitizeProfileBundles();
   const env = buildEnv();
   const args = ['/c', 'dsh', 'web', '--no-open', '--port', String(fixedPort || 0)];
@@ -232,24 +264,27 @@ function startDsh() {
   dshProc = proc;
 
   let output = '';
+  let pendingOutput = '';
+  const inspectLine = (line) => {
+    if (dshUrl || attempt !== bootAttempt) return;
+    const parsed = findLocalUrl(line, fixedPort);
+    if (parsed) {
+      dshUrl = parsed.href;
+      if (!fixedPort) fixedPort = Number(parsed.port) || 0;
+      waitForServer(dshUrl, attempt, () => {
+        if (attempt !== bootAttempt || !win || win.isDestroyed()) return;
+        clearBootTimer();
+        win.webContents.once('did-finish-load', () => win.setTitle(APP_TITLE));
+        win.loadURL(dshUrl).catch((err) => failBoot('无法加载 dsh', err.message));
+      });
+    }
+  };
   const capture = (chunk) => {
     const text = chunk.toString();
     output = (output + text).slice(-8000);
-    if (!dshUrl) {
-      const match = text.match(/https?:\/\/[^\s"'<>]+/);
-      if (match) {
-        dshUrl = match[0].trim();
-        if (!fixedPort) {
-          try { fixedPort = Number(new URL(dshUrl).port) || 0; } catch {}
-        }
-        clearBootTimer();
-        waitForServer(dshUrl, () => {
-          if (!win || win.isDestroyed()) return;
-          win.webContents.once('did-finish-load', () => win.setTitle(APP_TITLE));
-          win.loadURL(dshUrl);
-        });
-      }
-    }
+    const { lines, remainder } = consumeLines(pendingOutput, text);
+    pendingOutput = remainder;
+    for (const line of lines) inspectLine(line);
   };
   proc.stdout.on('data', capture);
   proc.stderr.on('data', capture);
@@ -304,7 +339,7 @@ async function restartDsh() {
     if (!win.isVisible()) win.show();
   }
 
-  killDshTree();
+  await killDshTree();
 
   if (!fixedPort) {
     try { fixedPort = await findFreePort(); } catch { fixedPort = 0; }
@@ -321,10 +356,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-    }
+    showWindow();
   });
 
   app.whenReady().then(async () => {
@@ -333,7 +365,8 @@ if (!app.requestSingleInstanceLock()) {
     try { fixedPort = await findFreePort(); } catch { fixedPort = 0; }
     startDsh();
 
-    ipcMain.on('dsh:request-restart', () => {
+    ipcMain.on('dsh:request-restart', (event) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) return;
       restartDsh().catch(() => {});
     });
 

@@ -77,9 +77,6 @@ function Resolve-Npm {
   return $npm
 }
 
-$npmGlobal = Join-Path $env:APPDATA "npm"
-$dsh = Join-Path $npmGlobal "dsh.cmd"
-
 # Plugins require the dsh CLI; if dsh is missing but a plugin was requested,
 # install dsh first as a dependency even when the dsh checkbox was left off.
 $needDshCli = ($InstallMarket -eq 1 -or $InstallWhale -eq 1)
@@ -100,6 +97,20 @@ if (-not $npm) {
 }
 Write-Host "npm: $npm"
 
+$code = Invoke-Tool $npm @("prefix", "-g")
+if ($code -ne 0 -or [string]::IsNullOrWhiteSpace($script:lastOutput)) {
+  Write-Host "Unable to determine npm's global install directory."
+  try { Stop-Transcript | Out-Null } catch {}
+  exit 10
+}
+$npmGlobal = ($script:lastOutput -split "`n" | Select-Object -Last 1).Trim()
+$dsh = Join-Path $npmGlobal "dsh.cmd"
+if (-not (Test-Path $dsh)) {
+  $resolvedDsh = Find-Command "dsh.cmd"
+  if (-not $resolvedDsh) { $resolvedDsh = Find-Command "dsh" }
+  if ($resolvedDsh) { $dsh = $resolvedDsh }
+}
+
 $dshPresent = $false
 if (Test-Path $dsh) {
   Write-Step "Detected existing dsh, verifying ..."
@@ -112,7 +123,7 @@ if (-not $dshPresent) {
   $code = Invoke-Tool $npm @("install", "-g", "@deepseek-ai/dsh", "--registry=https://registry.npmmirror.com")
   if ($code -ne 0) {
     Write-Step "npmmirror failed, retrying with official npm registry ..."
-    $code = Invoke-Tool $npm @("install", "-g", "@deepseek-ai/dsh")
+    $code = Invoke-Tool $npm @("install", "-g", "@deepseek-ai/dsh", "--registry=https://registry.npmjs.org")
   }
   if ($code -ne 0 -or -not (Test-Path $dsh)) {
     Write-Host "Failed to install dsh. See log: $logPath"
@@ -124,7 +135,7 @@ if (-not $dshPresent) {
 }
 
 function Test-AlreadyInstalled {
-  return ($script:lastOutput -match "already|already exists|already installed|exist|EEXIST|ERR_PNPM_ALREADY|conflict")
+  return ($script:lastOutput -match "(?i)\balready (installed|exists|present|added)\b|\bEEXIST\b|\bERR_PNPM_ALREADY\b")
 }
 
 function Add-DshPlugin {

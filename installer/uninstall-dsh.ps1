@@ -12,13 +12,6 @@ function Find-Command($name) {
   return $null
 }
 
-$dsh = Join-Path (Join-Path $env:APPDATA "npm") "dsh.cmd"
-if (-not (Test-Path $dsh)) {
-  Write-Host "Global dsh not found, nothing to remove."
-  try { Stop-Transcript | Out-Null } catch {}
-  exit 0
-}
-
 $npm = Find-Command "npm.cmd"
 if (-not $npm) { $npm = Find-Command "npm" }
 if (-not $npm) {
@@ -31,12 +24,25 @@ if (-not (Test-Path $npm)) {
   exit 30
 }
 
+$npmGlobal = [string](& $npm prefix -g 2>$null | Select-Object -Last 1)
+$npmGlobal = $npmGlobal.Trim()
+$dsh = if ($npmGlobal) { Join-Path $npmGlobal "dsh.cmd" } else { $null }
+if (-not $dsh -or -not (Test-Path $dsh)) {
+  $dsh = Find-Command "dsh.cmd"
+  if (-not $dsh) { $dsh = Find-Command "dsh" }
+}
+if (-not $dsh) {
+  Write-Host "Global dsh not found, nothing to remove."
+  try { Stop-Transcript | Out-Null } catch {}
+  exit 0
+}
+
 Write-Host "==> Uninstalling global @deepseek-ai/dsh ..."
 & $npm uninstall -g "@deepseek-ai/dsh" --registry=https://registry.npmmirror.com 2>&1 | ForEach-Object { Write-Host $_ }
 $code = $LASTEXITCODE
 if ($code -ne 0) {
   Write-Host "npmmirror failed, retrying with official npm registry ..."
-  & $npm uninstall -g "@deepseek-ai/dsh" 2>&1 | ForEach-Object { Write-Host $_ }
+  & $npm uninstall -g "@deepseek-ai/dsh" --registry=https://registry.npmjs.org 2>&1 | ForEach-Object { Write-Host $_ }
   $code = $LASTEXITCODE
 }
 

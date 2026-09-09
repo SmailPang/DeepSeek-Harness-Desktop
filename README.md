@@ -48,11 +48,11 @@
 1. 隐藏窗口启动 `dsh web --no-open --port 0`；
 2. 从输出中解析带 token 的 URL 并轮询等待服务就绪；
 3. 加载 Web UI（加载期间显示浅色主题启动页）；
-4. 关闭窗口即结束整个 dsh 进程树。
+4. 关闭窗口时最小化到系统托盘；从托盘菜单选择“退出”时结束整个 dsh 进程树。
 
 ## 开发
 
-环境要求：Node.js 18+（推荐 20/22 LTS）、Windows。
+环境要求：Node.js 22.12+、Windows。
 
 ```powershell
 git clone https://github.com/SmailPang/DeepSeek-Harness-Desktop.git
