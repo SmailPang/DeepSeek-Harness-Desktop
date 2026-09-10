@@ -1,15 +1,16 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } = require('electron');
 const { spawn, execFile } = require('node:child_process');
 const net = require('node:net');
-const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
-const { consumeLines, findLocalUrl, isSameOrigin, parseHttpUrl } = require('./lib/runtime-utils');
+const https = require('node:https');
+const { compareVersions, consumeLines, findLocalUrl, isSameOrigin, parseHttpUrl } = require('./lib/runtime-utils');
 
 const APP_TITLE = 'DeepSeek Harness';
 const BOOT_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 500;
+const LATEST_RELEASE_API = 'https://api.github.com/repos/SmailPang/DeepSeek-Harness-Desktop/releases/latest';
 
 let win = null;
 let tray = null;
@@ -22,6 +23,7 @@ let bootAttempt = 0;
 let stopped = false;
 let restarting = false;
 let trayHintShown = false;
+let checkingForUpdates = false;
 
 const RESTART_FETCH_PATCH = `(() => {
   if (window.__dshFetchPatched) return;
@@ -65,29 +67,34 @@ function findFreePort() {
 }
 
 function killDshTree() {
-  if (!dshProc || dshProc.killed) {
+  if (!dshProc || dshProc.killed || dshProc.exitCode !== null) {
     dshProc = null;
     return Promise.resolve();
   }
   const proc = dshProc;
   const pid = dshProc.pid;
   dshProc = null;
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      try { proc.kill(); } catch {}
-      resolve();
-    }, 5000);
-    try {
-      execFile('taskkill', ['/pid', String(pid), '/T', '/F'], () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    } catch {
-      clearTimeout(timeout);
-      try { proc.kill(); } catch {}
-      resolve();
-    }
+  const runTaskkill = (force) => new Promise((resolve) => {
+    const args = ['/pid', String(pid), '/T'];
+    if (force) args.push('/F');
+    try { execFile('taskkill', args, () => resolve()); } catch { resolve(); }
   });
+  const waitForExit = (timeoutMs) => new Promise((resolve) => {
+    if (proc.exitCode !== null) return resolve(true);
+    const timeout = setTimeout(() => resolve(false), timeoutMs);
+    proc.once('exit', () => {
+      clearTimeout(timeout);
+      resolve(true);
+    });
+  });
+  return (async () => {
+    await runTaskkill(false);
+    if (await waitForExit(1200)) return;
+    await runTaskkill(true);
+    if (!(await waitForExit(800))) {
+      try { proc.kill(); } catch {}
+    }
+  })();
 }
 
 function isSameDshOrigin(value) {
@@ -107,17 +114,90 @@ function createTray() {
   tray.setToolTip(APP_TITLE);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '显示主窗口', click: showWindow },
+    { label: '检查更新', click: () => checkForUpdates(false).catch(() => {}) },
     { type: 'separator' },
     {
       label: '退出',
-      click: () => {
-        isQuiting = true;
-        app.quit();
-      }
+      click: requestAppQuit
     }
   ]));
   tray.on('double-click', showWindow);
   tray.on('click', showWindow);
+}
+
+function fetchLatestRelease() {
+  return new Promise((resolve, reject) => {
+    const req = https.get(LATEST_RELEASE_API, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `DeepSeek-Harness-Desktop/${app.getVersion()}`,
+        'X-GitHub-Api-Version': '2022-11-28'
+      }
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 1024 * 1024) req.destroy(new Error('更新响应过大'));
+      });
+      res.on('end', () => {
+        if (res.statusCode !== 200) return reject(new Error(`GitHub 返回 HTTP ${res.statusCode}`));
+        try {
+          const release = JSON.parse(body);
+          const page = new URL(release.html_url);
+          if (page.protocol !== 'https:' || page.hostname !== 'github.com') throw new Error('无效的更新地址');
+          resolve({
+            version: String(release.tag_name || '').replace(/^v/i, ''),
+            notes: String(release.body || '').slice(0, 3000),
+            url: page.href
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.setTimeout(8000, () => req.destroy(new Error('检查更新超时')));
+    req.on('error', reject);
+  });
+}
+
+async function checkForUpdates(silent) {
+  if (checkingForUpdates || isQuiting) return;
+  checkingForUpdates = true;
+  try {
+    const release = await fetchLatestRelease();
+    const currentVersion = app.getVersion();
+    if (!release.version) throw new Error('GitHub Release 缺少版本号');
+    if (compareVersions(release.version, currentVersion) <= 0) {
+      if (!silent) dialog.showMessageBox({
+        type: 'info',
+        title: '检查更新',
+        message: `当前已是最新版本（v${currentVersion}）`,
+        buttons: ['确定']
+      });
+      return;
+    }
+    const result = await dialog.showMessageBox({
+      type: 'info',
+      title: '发现新版本',
+      message: `DeepSeek Harness Desktop v${release.version} 已发布`,
+      detail: release.notes || '可以前往 GitHub Release 页面下载安装。',
+      buttons: ['前往下载', '稍后再说'],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (result.response === 0) await shell.openExternal(release.url);
+  } catch (error) {
+    if (!silent) dialog.showMessageBox({
+      type: 'warning',
+      title: '检查更新失败',
+      message: '暂时无法连接 GitHub 检查更新',
+      detail: error.message,
+      buttons: ['确定']
+    });
+  } finally {
+    checkingForUpdates = false;
+  }
 }
 
 function showWindow() {
@@ -125,6 +205,20 @@ function showWindow() {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+}
+
+async function requestAppQuit() {
+  if (isQuiting) return;
+  isQuiting = true;
+  stopped = true;
+  clearBootTimer();
+  if (win && !win.isDestroyed()) win.hide();
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+  await killDshTree();
+  app.quit();
 }
 
 function createWindow() {
@@ -150,7 +244,7 @@ function createWindow() {
   win.once('ready-to-show', () => win.show());
 
   win.on('close', (event) => {
-    if (isQuiting || stopped) return;
+    if (isQuiting) return;
     event.preventDefault();
     win.hide();
     if (!trayHintShown) {
@@ -172,6 +266,21 @@ function createWindow() {
     if (!dshUrl) return;
     win.webContents.executeJavaScript(RESTART_FETCH_PATCH, true).catch(() => {});
   });
+
+  win.webContents.session.webRequest.onBeforeRequest(
+    { urls: ['http://127.0.0.1/*', 'http://localhost/*'] },
+    (details, callback) => {
+      let isRestartRequest = false;
+      try {
+        const target = new URL(details.url);
+        isRestartRequest = details.method === 'POST'
+          && target.pathname === '/dsh-market/restart'
+          && isSameDshOrigin(details.url);
+      } catch {}
+      callback({ cancel: isRestartRequest });
+      if (isRestartRequest) setImmediate(() => restartDsh().catch(() => {}));
+    }
+  );
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isSameDshOrigin(url)) return { action: 'allow' };
@@ -214,47 +323,34 @@ function clearBootTimer() {
   }
 }
 
-function failBoot(title, detail) {
+async function failBoot(title, detail) {
   if (stopped) return;
   stopped = true;
+  bootAttempt += 1;
   clearBootTimer();
-  killDshTree();
-  dialog.showErrorBox(title, detail);
-  app.exit(1);
+  await killDshTree();
+  dshUrl = null;
+  if (!win || win.isDestroyed()) return;
+  await win.loadFile(path.join(__dirname, 'loading.html'), {
+    query: { reason: 'error', title, detail }
+  }).catch(() => {});
+  showWindow();
 }
 
-const WEB_ALL_BUNDLE = '@linxin666/dsh-web-all';
-const WEB_ALL_EMBEDDED_BUNDLES = new Set([
-  'dsh-better-sidebar',
-  '@linxin666/dsh-remote-web-ui'
-]);
-
-function sanitizeProfileBundles() {
-  try {
-    const manifestPath = path.join(os.homedir(), '.dsh', 'profiles', 'web', 'package.json');
-    if (!fs.existsSync(manifestPath)) return;
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const bundles = manifest?.dsh?.profile?.bundles;
-    if (!Array.isArray(bundles) || !bundles.includes(WEB_ALL_BUNDLE)) return;
-
-    const deduped = bundles.filter((name) => !WEB_ALL_EMBEDDED_BUNDLES.has(name));
-    if (deduped.length === bundles.length) return;
-
-    manifest.dsh.profile.bundles = deduped;
-    const backupPath = `${manifestPath}.dsh-desktop-backup`;
-    const tempPath = `${manifestPath}.${process.pid}.tmp`;
-    if (!fs.existsSync(backupPath)) fs.copyFileSync(manifestPath, backupPath);
-    fs.writeFileSync(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-    fs.renameSync(tempPath, manifestPath);
-    console.log(`[dsh-desktop] Removed duplicate web bundles; backup: ${backupPath}`);
-  } catch {
-    // A broken/locked profile manifest must not prevent the normal dsh error path.
+async function retryBoot() {
+  if (!stopped || isQuiting) return;
+  await killDshTree();
+  stopped = false;
+  restarting = false;
+  dshUrl = null;
+  if (win && !win.isDestroyed()) {
+    await win.loadFile(path.join(__dirname, 'loading.html')).catch(() => {});
   }
+  startDsh();
 }
 
 function startDsh() {
   const attempt = ++bootAttempt;
-  sanitizeProfileBundles();
   const env = buildEnv();
   const args = ['/c', 'dsh', 'web', '--no-open', '--port', String(fixedPort || 0)];
   const proc = spawn(process.env.ComSpec || 'cmd.exe', args, {
@@ -291,7 +387,7 @@ function startDsh() {
 
   proc.on('error', (err) => {
     if (restarting) return;
-    failBoot(
+    void failBoot(
       '无法启动 dsh',
       `请确认已正确安装 dsh（npm install -g @deepseek-ai/dsh），且 dsh 命令在 PATH 中可用。\n\n错误信息：${err.message}`
     );
@@ -305,22 +401,19 @@ function startDsh() {
       return;
     }
 
-    stopped = true;
-    isQuiting = true;
     clearBootTimer();
     if (!dshUrl) {
-      dialog.showErrorBox(
+      void failBoot(
         'dsh 启动失败',
         `dsh 进程意外退出（退出码 ${code}）。请确认已正确安装 dsh，可在终端执行 dsh web 验证。\n\n输出：\n${output || '（无）'}`
       );
-      app.exit(1);
       return;
     }
-    app.quit();
+    void failBoot('dsh 已停止', `dsh 进程意外退出（退出码 ${code}）。\n\n输出：\n${output || '（无）'}`);
   });
 
   bootTimer = setTimeout(() => {
-    failBoot(
+    void failBoot(
       'dsh 启动超时',
       `等待 ${APP_TITLE} Web UI 就绪超时（${BOOT_TIMEOUT_MS / 1000} 秒）。\n\n输出：\n${output || '（无）'}`
     );
@@ -349,6 +442,7 @@ async function restartDsh() {
     if (!restarting || stopped) return;
     restarting = false;
     startDsh();
+    setTimeout(() => checkForUpdates(true).catch(() => {}), 5000);
   }, 800);
 }
 
@@ -370,6 +464,16 @@ if (!app.requestSingleInstanceLock()) {
       restartDsh().catch(() => {});
     });
 
+    ipcMain.on('dsh:retry-boot', (event) => {
+      if (!win || event.sender !== win.webContents || !event.senderFrame.url.startsWith('file:')) return;
+      retryBoot().catch(() => {});
+    });
+
+    ipcMain.on('dsh:quit', (event) => {
+      if (!win || event.sender !== win.webContents || !event.senderFrame.url.startsWith('file:')) return;
+      requestAppQuit().catch(() => {});
+    });
+
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -380,7 +484,7 @@ if (!app.requestSingleInstanceLock()) {
     isQuiting = true;
     stopped = true;
     clearBootTimer();
-    killDshTree();
+    void killDshTree();
     if (tray) {
       tray.destroy();
       tray = null;

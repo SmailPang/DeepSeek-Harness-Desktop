@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { consumeLines, findLocalUrl, isSameOrigin, parseHttpUrl } = require('../lib/runtime-utils');
+const { compareVersions, consumeLines, findLocalUrl, isSameOrigin, parseHttpUrl } = require('../lib/runtime-utils');
 
 test('origin comparison does not accept a port-prefix lookalike', () => {
   assert.equal(isSameOrigin('http://127.0.0.1:12345/path', 'http://127.0.0.1:1234'), false);
@@ -23,4 +23,10 @@ test('split process output is reassembled before URL parsing', () => {
   assert.deepEqual(first.lines, []);
   const second = consumeLines(first.remainder, 'en=ok\n');
   assert.equal(findLocalUrl(second.lines[0], 4321).searchParams.get('token'), 'ok');
+});
+
+test('release versions are compared numerically', () => {
+  assert.equal(compareVersions('v1.10.0', '1.9.9'), 1);
+  assert.equal(compareVersions('1.5.0', 'v1.5.0'), 0);
+  assert.equal(compareVersions('1.4.9', '1.5.0'), -1);
 });

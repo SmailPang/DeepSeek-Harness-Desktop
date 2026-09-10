@@ -47,6 +47,32 @@
       letter-spacing: 0.3px;
       color: #5b6678;
     }
+    .detail {
+      display: none;
+      max-width: 560px;
+      max-height: 180px;
+      overflow: auto;
+      margin: 0;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #f1f5f9;
+      color: #64748b;
+      font: 12px/1.55 Consolas, monospace;
+      text-align: left;
+      white-space: pre-wrap;
+      user-select: text;
+    }
+    .actions { display: none; gap: 10px; }
+    button {
+      padding: 8px 18px;
+      border: 0;
+      border-radius: 9px;
+      background: #4c8dff;
+      color: white;
+      font: 14px "Segoe UI", "Microsoft YaHei", sans-serif;
+      cursor: pointer;
+    }
+    button.secondary { background: #e2e8f0; color: #475569; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes rise {
       from { opacity: 0; transform: translateY(8px) scale(0.985); }
@@ -59,12 +85,31 @@
     <img class="logo" src="assets/icon.png" alt="DeepSeek Harness" />
     <div class="spinner"></div>
     <div class="text" id="status">正在启动 DeepSeek Harness…</div>
+    <pre class="detail" id="detail"></pre>
+    <div class="actions" id="actions">
+      <button id="retry">重试启动</button>
+      <button class="secondary" id="quit">退出</button>
+    </div>
   </div>
   <script>
     (function () {
-      var reason = new URLSearchParams(window.location.search).get("reason");
+      var params = new URLSearchParams(window.location.search);
+      var reason = params.get("reason");
       if (reason === "restart") {
         document.getElementById("status").textContent = "正在重启 DeepSeek Harness…";
+      } else if (reason === "error") {
+        document.querySelector(".spinner").style.display = "none";
+        document.getElementById("status").textContent = params.get("title") || "启动失败";
+        var detail = document.getElementById("detail");
+        detail.textContent = params.get("detail") || "请检查 dsh 是否已正确安装。";
+        detail.style.display = "block";
+        document.getElementById("actions").style.display = "flex";
+        document.getElementById("retry").addEventListener("click", function () {
+          window.__dshShell.retryBoot();
+        });
+        document.getElementById("quit").addEventListener("click", function () {
+          window.__dshShell.quit();
+        });
       }
     })();
   </script>

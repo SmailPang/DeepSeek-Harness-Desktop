@@ -1,11 +1,9 @@
 # Post-install setup for DeepSeek Harness desktop shell installer.
 # Exit codes: 0 ok, 10 node/npm missing (when install was requested),
-#              11 dsh install failed, 12 plugin store failed,
-#              20 optional whale plugin failed.
+#              11 dsh install failed, 12 plugin store failed.
 param(
   [int]$InstallDsh = 0,
-  [int]$InstallMarket = 0,
-  [int]$InstallWhale = 0
+  [int]$InstallMarket = 0
 )
 
 $ErrorActionPreference = "Continue"
@@ -79,7 +77,7 @@ function Resolve-Npm {
 
 # Plugins require the dsh CLI; if dsh is missing but a plugin was requested,
 # install dsh first as a dependency even when the dsh checkbox was left off.
-$needDshCli = ($InstallMarket -eq 1 -or $InstallWhale -eq 1)
+$needDshCli = ($InstallMarket -eq 1)
 $nothingToDo = ($InstallDsh -eq 0 -and -not $needDshCli)
 
 if ($nothingToDo) {
@@ -167,27 +165,6 @@ if ($InstallMarket -eq 1) {
     exit 12
   }
   Write-Host "dshmarket installed."
-}
-
-if ($InstallWhale -eq 1) {
-  $whaleSpec = "github:MeteorNOX/DeepSeek-Balance-Whale-Widget"
-  Write-Step "Installing DeepSeek Balance Whale Widget from GitHub ..."
-  $code = Add-DshPlugin $whaleSpec
-  if ($code -ne 0) {
-    Write-Step "GitHub failed, retrying via gh-proxy.com mirror ..."
-    $gitMirrorEnv = @{
-      "GIT_CONFIG_COUNT" = "1"
-      "GIT_CONFIG_KEY_0" = "url.https://gh-proxy.com/https://github.com/.insteadOf"
-      "GIT_CONFIG_VALUE_0" = "https://github.com/"
-    }
-    $code = Add-DshPlugin $whaleSpec $gitMirrorEnv
-  }
-  if ($code -ne 0) {
-    Write-Host "Failed to install the Whale widget. See log: $logPath"
-    try { Stop-Transcript | Out-Null } catch {}
-    exit 20
-  }
-  Write-Host "Whale widget installed."
 }
 
 Write-Host ""

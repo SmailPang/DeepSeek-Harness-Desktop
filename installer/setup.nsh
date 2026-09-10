@@ -18,10 +18,8 @@
 !ifndef BUILD_UNINSTALLER
 Var DlgDsh
 Var DlgMarket
-Var DlgWhale
 Var DshState
 Var MarketState
-Var WhaleState
 
 Function DshComponentsPageCreate
   nsDialogs::Create 1018
@@ -46,10 +44,7 @@ Function DshComponentsPageCreate
   Pop $DlgMarket
   ${NSD_Check} $DlgMarket
 
-  ${NSD_CreateCheckBox} 0u 78u 100% 12u "DeepSeek Balance Whale Widget"
-  Pop $DlgWhale
-
-  ${NSD_CreateLabel} 0u 98u 100% 42u "说明：不勾选 DeepSeek Harness 时，请先自行安装 dsh$\r$\n（npm install -g @deepseek-ai/dsh），否则桌面外壳无法启动；$\r$\n未勾选的插件也可日后在 dsh 中自行安装。"
+  ${NSD_CreateLabel} 0u 78u 100% 42u "说明：不勾选 DeepSeek Harness 时，请先自行安装 dsh$\r$\n（npm install -g @deepseek-ai/dsh），否则桌面外壳无法启动；$\r$\n插件商店也可日后在 dsh 中自行安装。"
   Pop $1
 
   nsDialogs::Show
@@ -58,7 +53,6 @@ FunctionEnd
 Function DshComponentsPageLeave
   ${NSD_GetState} $DlgDsh $DshState
   ${NSD_GetState} $DlgMarket $MarketState
-  ${NSD_GetState} $DlgWhale $WhaleState
 FunctionEnd
 
 !macro customComponentsPage
@@ -72,12 +66,8 @@ FunctionEnd
   ${If} $MarketState == ""
     StrCpy $MarketState 0
   ${EndIf}
-  ${If} $WhaleState == ""
-    StrCpy $WhaleState 0
-  ${EndIf}
-
   DetailPrint "正在按选择检查并安装 dsh 与插件，可能需要几分钟..."
-  nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\setup\postinstall.ps1" -InstallDsh $DshState -InstallMarket $MarketState -InstallWhale $WhaleState'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\setup\postinstall.ps1" -InstallDsh $DshState -InstallMarket $MarketState'
   Pop $0
   ${If} $0 == 10
     MessageBox MB_OK|MB_ICONSTOP "未检测到 Node.js / npm。$\r$\n$\r$\n请先安装 Node.js LTS（https://nodejs.org/），再重新运行本安装程序。"
@@ -85,8 +75,6 @@ FunctionEnd
     MessageBox MB_OK|MB_ICONSTOP "dsh 自动安装失败。$\r$\n请检查网络后手动执行：npm install -g @deepseek-ai/dsh$\r$\n日志：$TEMP\dsh-desktop-setup.log"
   ${ElseIf} $0 == 12
     MessageBox MB_OK|MB_ICONEXCLAMATION "插件商店 dshmarket 安装失败，桌面外壳不受影响。$\r$\n可稍后手动执行：dsh plugin --profile web add dshmarket$\r$\n日志：$TEMP\dsh-desktop-setup.log"
-  ${ElseIf} $0 == 20
-    MessageBox MB_OK|MB_ICONEXCLAMATION "DeepSeek Balance Whale Widget 安装失败，通常是网络问题。$\r$\n可稍后重新运行安装程序，或手动执行：$\r$\ndsh plugin --profile web add github:MeteorNOX/DeepSeek-Balance-Whale-Widget$\r$\n日志：$TEMP\dsh-desktop-setup.log"
   ${ElseIf} $0 != 0
     MessageBox MB_OK|MB_ICONEXCLAMATION "组件安装步骤出现异常（错误码 $0），桌面外壳已安装完成。$\r$\n日志：$TEMP\dsh-desktop-setup.log"
   ${EndIf}

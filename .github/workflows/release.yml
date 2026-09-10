@@ -24,6 +24,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run checks
+        run: npm run check
+
       - name: Build installer
         run: npm run dist
 
