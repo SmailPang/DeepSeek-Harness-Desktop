@@ -29,4 +29,6 @@ test('release versions are compared numerically', () => {
   assert.equal(compareVersions('v1.10.0', '1.9.9'), 1);
   assert.equal(compareVersions('1.5.0', 'v1.5.0'), 0);
   assert.equal(compareVersions('1.4.9', '1.5.0'), -1);
+  assert.equal(compareVersions('0.1.5-rc.2', '0.1.5-rc.1'), 1);
+  assert.equal(compareVersions('0.1.5', '0.1.5-rc.2'), 1);
 });

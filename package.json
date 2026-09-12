@@ -1,13 +1,13 @@
 {
   "name": "dsh-desktop",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "One-click desktop wrapper that launches dsh web and shows DeepSeek Harness Web UI as a desktop app.",
   "main": "main.js",
   "author": "",
   "license": "MIT",
   "scripts": {
     "postinstall": "node installer/patch-electron-builder.js",
-    "check": "node --check main.js && node --check preload.js && node --check installer/patch-electron-builder.js && node --test",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/desktop-settings.js && node --check installer/patch-electron-builder.js && node --test",
     "start": "electron .",
     "dist": "electron-builder --win nsis --publish never"
   },
@@ -22,6 +22,7 @@
       "main.js",
       "preload.js",
       "lib/**/*",
+      "renderer/**/*",
       "loading.html",
       "assets/**/*"
     ],

@@ -11,6 +11,10 @@ const APP_TITLE = 'DeepSeek Harness';
 const BOOT_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 500;
 const LATEST_RELEASE_API = 'https://api.github.com/repos/SmailPang/DeepSeek-Harness-Desktop/releases/latest';
+const PROJECT_URL = 'https://github.com/SmailPang/DeepSeek-Harness-Desktop';
+const DSH_PACKAGE_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh';
+const DSH_REGISTRY_API = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh/latest';
+const DESKTOP_SETTINGS_PATCH = fs.readFileSync(path.join(__dirname, 'renderer', 'desktop-settings.js'), 'utf8');
 
 let win = null;
 let tray = null;
@@ -23,7 +27,9 @@ let bootAttempt = 0;
 let stopped = false;
 let restarting = false;
 let trayHintShown = false;
-let checkingForUpdates = false;
+let updatingDsh = false;
+let startupUpdateCheckConsumed = false;
+let updatePreferencesCache = null;
 
 const RESTART_FETCH_PATCH = `(() => {
   if (window.__dshFetchPatched) return;
@@ -114,7 +120,6 @@ function createTray() {
   tray.setToolTip(APP_TITLE);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '显示主窗口', click: showWindow },
-    { label: '检查更新', click: () => checkForUpdates(false).catch(() => {}) },
     { type: 'separator' },
     {
       label: '退出',
@@ -123,6 +128,32 @@ function createTray() {
   ]));
   tray.on('double-click', showWindow);
   tray.on('click', showWindow);
+}
+
+function getUpdatePreferencesPath() {
+  return path.join(app.getPath('userData'), 'desktop-preferences.json');
+}
+
+function getUpdatePreferences() {
+  if (updatePreferencesCache) return { ...updatePreferencesCache };
+  const defaults = { checkOnStartup: true };
+  try {
+    const stored = JSON.parse(fs.readFileSync(getUpdatePreferencesPath(), 'utf8'));
+    updatePreferencesCache = {
+      checkOnStartup: typeof stored.checkOnStartup === 'boolean' ? stored.checkOnStartup : true
+    };
+  } catch {
+    updatePreferencesCache = defaults;
+  }
+  return { ...updatePreferencesCache };
+}
+
+function setUpdatePreferences(values) {
+  updatePreferencesCache = { ...getUpdatePreferences(), ...values };
+  const target = getUpdatePreferencesPath();
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${JSON.stringify(updatePreferencesCache, null, 2)}\n`, 'utf8');
+  return { ...updatePreferencesCache };
 }
 
 function fetchLatestRelease() {
@@ -161,43 +192,117 @@ function fetchLatestRelease() {
   });
 }
 
-async function checkForUpdates(silent) {
-  if (checkingForUpdates || isQuiting) return;
-  checkingForUpdates = true;
-  try {
-    const release = await fetchLatestRelease();
-    const currentVersion = app.getVersion();
-    if (!release.version) throw new Error('GitHub Release 缺少版本号');
-    if (compareVersions(release.version, currentVersion) <= 0) {
-      if (!silent) dialog.showMessageBox({
-        type: 'info',
-        title: '检查更新',
-        message: `当前已是最新版本（v${currentVersion}）`,
-        buttons: ['确定']
+function getInstalledDshVersion() {
+  return new Promise((resolve, reject) => {
+    execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'dsh --version'], {
+      windowsHide: true,
+      env: buildEnv(),
+      timeout: 8000
+    }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(String(stderr || error.message).trim()));
+      const match = String(stdout).match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/);
+      if (!match) return reject(new Error('无法识别已安装的 DSH 版本'));
+      resolve(match[0]);
+    });
+  });
+}
+
+function fetchLatestDshVersion() {
+  return new Promise((resolve, reject) => {
+    const req = https.get(DSH_REGISTRY_API, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': `DeepSeek-Harness-Desktop/${app.getVersion()}`
+      }
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 1024 * 1024) req.destroy(new Error('DSH 更新响应过大'));
       });
-      return;
+      res.on('end', () => {
+        if (res.statusCode !== 200) return reject(new Error(`npm 返回 HTTP ${res.statusCode}`));
+        try {
+          const data = JSON.parse(body);
+          if (!data.version) throw new Error('npm 未返回 DSH 版本号');
+          resolve(String(data.version));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.setTimeout(8000, () => req.destroy(new Error('检查 DSH 更新超时')));
+    req.on('error', reject);
+  });
+}
+
+function installLatestDsh() {
+  return new Promise((resolve, reject) => {
+    execFile(process.env.ComSpec || 'cmd.exe', [
+      '/d', '/s', '/c', 'npm install --global @deepseek-ai/dsh@latest'
+    ], {
+      windowsHide: true,
+      env: buildEnv(),
+      timeout: 5 * 60_000,
+      maxBuffer: 1024 * 1024
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = String(stderr || stdout || error.message).trim().slice(-8000);
+        return reject(new Error(detail || 'npm 更新 DSH 失败'));
+      }
+      resolve(String(stdout || stderr).trim().slice(-8000));
+    });
+  });
+}
+
+async function getDesktopUpdateStatus() {
+  const release = await fetchLatestRelease();
+  const current = app.getVersion();
+  if (!release.version) throw new Error('GitHub Release 缺少版本号');
+  return { current, latest: release.version, updateAvailable: compareVersions(release.version, current) > 0, release };
+}
+
+async function getDshUpdateStatus() {
+  const [current, latest] = await Promise.all([getInstalledDshVersion(), fetchLatestDshVersion()]);
+  return { current, latest, updateAvailable: compareVersions(latest, current) > 0 };
+}
+
+function serializeDesktopStatus(status) {
+  return {
+    current: status.current,
+    latest: status.latest,
+    updateAvailable: status.updateAvailable
+  };
+}
+
+function serializeDshStatus(status) {
+  return {
+    current: status.current,
+    latest: status.latest,
+    updateAvailable: status.updateAvailable
+  };
+}
+
+async function getEmbeddedUpdateResult(scope) {
+  const getDesktop = async () => {
+    try {
+      return { ok: true, ...serializeDesktopStatus(await getDesktopUpdateStatus()) };
+    } catch (error) {
+      return { ok: false, error: error.message };
     }
-    const result = await dialog.showMessageBox({
-      type: 'info',
-      title: '发现新版本',
-      message: `DeepSeek Harness Desktop v${release.version} 已发布`,
-      detail: release.notes || '可以前往 GitHub Release 页面下载安装。',
-      buttons: ['前往下载', '稍后再说'],
-      defaultId: 0,
-      cancelId: 1
-    });
-    if (result.response === 0) await shell.openExternal(release.url);
-  } catch (error) {
-    if (!silent) dialog.showMessageBox({
-      type: 'warning',
-      title: '检查更新失败',
-      message: '暂时无法连接 GitHub 检查更新',
-      detail: error.message,
-      buttons: ['确定']
-    });
-  } finally {
-    checkingForUpdates = false;
-  }
+  };
+  const getDsh = async () => {
+    try {
+      return { ok: true, ...serializeDshStatus(await getDshUpdateStatus()) };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  };
+  if (scope === 'desktop') return { desktop: await getDesktop() };
+  if (scope === 'dsh') return { dsh: await getDsh() };
+  const [desktop, dsh] = await Promise.all([getDesktop(), getDsh()]);
+  return { desktop, dsh };
 }
 
 function showWindow() {
@@ -265,6 +370,7 @@ function createWindow() {
   win.webContents.on('dom-ready', () => {
     if (!dshUrl) return;
     win.webContents.executeJavaScript(RESTART_FETCH_PATCH, true).catch(() => {});
+    win.webContents.executeJavaScript(DESKTOP_SETTINGS_PATCH, true).catch(() => {});
   });
 
   win.webContents.session.webRequest.onBeforeRequest(
@@ -442,7 +548,6 @@ async function restartDsh() {
     if (!restarting || stopped) return;
     restarting = false;
     startDsh();
-    setTimeout(() => checkForUpdates(true).catch(() => {}), 5000);
   }, 800);
 }
 
@@ -462,6 +567,99 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.on('dsh:request-restart', (event) => {
       if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) return;
       restartDsh().catch(() => {});
+    });
+
+    ipcMain.handle('dsh:get-desktop-info', async (event) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) {
+        throw new Error('不允许的请求');
+      }
+      let dshVersion = null;
+      try { dshVersion = await getInstalledDshVersion(); } catch {}
+      return {
+        appVersion: app.getVersion(),
+        dshVersion,
+        electronVersion: process.versions.electron,
+        license: 'MIT'
+      };
+    });
+
+    ipcMain.handle('dsh:check-updates', async (event, scope) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) {
+        throw new Error('不允许的请求');
+      }
+      if (!['all', 'desktop', 'dsh'].includes(scope)) throw new Error('无效的更新检查范围');
+      return getEmbeddedUpdateResult(scope);
+    });
+
+    ipcMain.handle('dsh:check-startup-updates', async (event) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) {
+        throw new Error('不允许的请求');
+      }
+      if (startupUpdateCheckConsumed) return null;
+      startupUpdateCheckConsumed = true;
+      if (!getUpdatePreferences().checkOnStartup) return null;
+      return getEmbeddedUpdateResult('all');
+    });
+
+    ipcMain.handle('dsh:get-update-preferences', async (event) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) {
+        throw new Error('不允许的请求');
+      }
+      return getUpdatePreferences();
+    });
+
+    ipcMain.handle('dsh:set-update-preferences', async (event, values) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) {
+        throw new Error('不允许的请求');
+      }
+      if (!values || typeof values.checkOnStartup !== 'boolean') throw new Error('无效的更新设置');
+      return setUpdatePreferences({ checkOnStartup: values.checkOnStartup });
+    });
+
+    ipcMain.handle('dsh:update-dsh', async (event) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) {
+        throw new Error('不允许的请求');
+      }
+      if (updatingDsh) return { ok: false, error: 'DSH 更新正在进行中' };
+
+      let status;
+      try {
+        status = await getDshUpdateStatus();
+      } catch (error) {
+        return { ok: false, error: error.message };
+      }
+      if (!status.updateAvailable) {
+        return { ok: true, alreadyLatest: true, version: status.current };
+      }
+
+      const confirmation = await dialog.showMessageBox(win, {
+        type: 'question',
+        title: '更新 DSH',
+        message: `将 DSH 更新到 ${status.latest}`,
+        detail: `当前版本：${status.current}\n最新版本：${status.latest}\n\n桌面应用将通过 npm 更新全局安装的 @deepseek-ai/dsh，完成后自动重启 DeepSeek Harness。`,
+        buttons: ['更新 DSH', '取消'],
+        defaultId: 0,
+        cancelId: 1
+      });
+      if (confirmation.response !== 0) return { ok: false, cancelled: true };
+
+      updatingDsh = true;
+      try {
+        await installLatestDsh();
+        const installedVersion = await getInstalledDshVersion().catch(() => status.latest);
+        return { ok: true, version: installedVersion, restartRequired: true };
+      } catch (error) {
+        return { ok: false, error: error.message };
+      } finally {
+        updatingDsh = false;
+      }
+    });
+
+    ipcMain.on('dsh:open-update-page', (event, target) => {
+      if (!win || event.sender !== win.webContents || !isSameDshOrigin(event.senderFrame.url)) return;
+      if (target === 'desktop') shell.openExternal(`${PROJECT_URL}/releases/latest`).catch(() => {});
+      if (target === 'project') shell.openExternal(PROJECT_URL).catch(() => {});
+      if (target === 'dsh') shell.openExternal(DSH_PACKAGE_URL).catch(() => {});
     });
 
     ipcMain.on('dsh:retry-boot', (event) => {
